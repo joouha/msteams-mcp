@@ -1,8 +1,12 @@
 /**
  * Authentication guard utilities.
- * 
+ *
  * Provides reusable auth checks that return Result types for consistent
  * error handling across API modules.
+ *
+ * Multi-account: caches (region config, tenant ID) are keyed by the
+ * active account from session-store, so switching accounts automatically
+ * picks up the correct cached state.
  */
 
 import { ErrorCode, createError, type McpError } from '../types/errors.js';
@@ -20,7 +24,7 @@ import {
   type MessageAuthInfo,
   type RegionConfig,
 } from '../auth/token-extractor.js';
-import { clearTokenCache } from '../auth/session-store.js';
+import { clearTokenCache, getActiveAccount } from '../auth/session-store.js';
 import { DEFAULT_TEAMS_BASE_URL } from './api-config.js';
 import { TOKEN_REFRESH_THRESHOLD_MS, ASSIGNMENTS_UNAVAILABLE_TTL_MS } from '../constants.js';
 import { refreshTokensViaBrowser, refreshAssignmentsToken, refreshGraphToken } from '../auth/token-refresh.js';
@@ -33,6 +37,25 @@ import { refreshTokensViaBrowser, refreshAssignmentsToken, refreshGraphToken } f
 export interface CsaAuthInfo {
   auth: MessageAuthInfo;
   csaToken: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-Account Caches
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Cached region config per account (undefined = not yet extracted, null = extraction failed). */
+const regionConfigCache = new Map<string, RegionConfig | null | undefined>();
+
+/** Cached tenant ID per account (undefined = not yet extracted, null = extraction failed). */
+const tenantIdCache = new Map<string, string | null | undefined>();
+
+/**
+ * Clears all per-account caches.
+ * Called after login/logout to pick up new session.
+ */
+export function clearRegionCache(): void {
+  regionConfigCache.delete(getActiveAccount());
+  tenantIdCache.delete(getActiveAccount());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,27 +92,40 @@ function onDemandTokenGuard(
   extract: () => { token: string; expiry: Date } | null,
   refresh: () => Promise<Result<string>>,
 ) {
-  let unavailable: { until: number; error: McpError } | undefined;
-  let pending: Promise<Result<string>> | undefined;
+  type AccountState = {
+    unavailable?: { until: number; error: McpError };
+    pending?: Promise<Result<string>>;
+  };
+  const states = new Map<string, AccountState>();
+  const stateForAccount = (): AccountState => {
+    const account = getActiveAccount();
+    let state = states.get(account);
+    if (!state) {
+      state = {};
+      states.set(account, state);
+    }
+    return state;
+  };
   return {
-    reset(): void { unavailable = undefined; },
+    reset(): void { stateForAccount().unavailable = undefined; },
     async require(): Promise<Result<string, McpError>> {
+      const state = stateForAccount();
       const current = extract();
       if (current && current.expiry.getTime() - Date.now() >= TOKEN_REFRESH_THRESHOLD_MS) {
         return ok(current.token);
       }
-      if (unavailable && Date.now() < unavailable.until) {
-        return current ? ok(current.token) : err(unavailable.error);
+      if (state.unavailable && Date.now() < state.unavailable.until) {
+        return current ? ok(current.token) : err(state.unavailable.error);
       }
-      if (!pending) {
-        pending = refresh().then(result => {
+      if (!state.pending) {
+        state.pending = refresh().then(result => {
           if (!result.ok && result.error.code === ErrorCode.ACCESS_DENIED) {
-            unavailable = { until: Date.now() + ASSIGNMENTS_UNAVAILABLE_TTL_MS, error: result.error };
+            state.unavailable = { until: Date.now() + ASSIGNMENTS_UNAVAILABLE_TTL_MS, error: result.error };
           }
           return result;
-        }).finally(() => { pending = undefined; });
+        }).finally(() => { state.pending = undefined; });
       }
-      const result = await pending;
+      const result = await state.pending;
       if (!result.ok && current && current.expiry.getTime() > Date.now()) return ok(current.token);
       return result;
     },
@@ -204,7 +240,7 @@ export function requireSkypeSpacesAuthWithConfig(): Result<SkypeSpacesAuthWithCo
 /**
  * Handles a failed Substrate/files API response by clearing the token cache
  * when the error indicates an expired token.
- * 
+ *
  * Eliminates the repeated pattern:
  * ```
  * if (!response.ok) {
@@ -214,7 +250,7 @@ export function requireSkypeSpacesAuthWithConfig(): Result<SkypeSpacesAuthWithCo
  *   return response;
  * }
  * ```
- * 
+ *
  * @param response - A failed Result (response.ok === false)
  * @returns The same failed Result, unchanged
  */
@@ -232,18 +268,18 @@ export function handleSubstrateError<T>(response: Result<T, McpError>): Result<T
 /** Default region when session config is unavailable. */
 const DEFAULT_REGION = 'amer';
 
-/** Cached region config (undefined = not yet extracted, null = extraction failed). */
-let cachedRegionConfig: RegionConfig | null | undefined = undefined;
-
 /**
  * Gets the full region config (from DISCOVER-REGION-GTM) including partition
- * and URLs, with caching. Returns null if no valid session.
+ * and URLs, with per-account caching. Returns null if no valid session.
  */
 export function getRegionConfig(): RegionConfig | null {
-  if (cachedRegionConfig === undefined) {
-    cachedRegionConfig = extractRegionConfig();
+  const account = getActiveAccount();
+  let cached = regionConfigCache.get(account);
+  if (cached === undefined) {
+    cached = extractRegionConfig();
+    regionConfigCache.set(account, cached);
   }
-  return cachedRegionConfig;
+  return cached;
 }
 
 /** Gets the user's region (e.g. "amer"), falling back to 'amer'. */
@@ -289,7 +325,7 @@ export interface MessageAuthWithConfig {
 
 /**
  * Requires valid message auth AND returns API config in one call.
- * 
+ *
  * Eliminates the repeated 4-line pattern:
  * ```
  * const authResult = requireMessageAuth();
@@ -309,7 +345,7 @@ export function requireMessageAuthWithConfig(): Result<MessageAuthWithConfig, Mc
 
 /**
  * Gets region and base URL together for API calls.
- * 
+ *
  * Shared helper used by all API modules to avoid duplicating
  * the getRegion() + getTeamsBaseUrl() pattern.
  */
@@ -321,34 +357,25 @@ export function getApiConfig(): ApiConfig {
   };
 }
 
-/**
- * Clears the cached region config and tenant ID.
- * Call this after login/logout to pick up new session.
- */
-export function clearRegionCache(): void {
-  cachedRegionConfig = undefined;
-  cachedTenantId = undefined;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tenant ID
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Cached tenant ID (undefined = not yet extracted, null = extraction failed). */
-let cachedTenantId: string | null | undefined = undefined;
-
 /**
  * Gets the tenant ID from the user's session (JWT tokens).
- * 
+ *
  * Required for building reliable Teams deep links.
  * Returns null if no valid session is available.
+ * Per-account cached.
  */
 export function getTenantId(): string | null {
-  if (cachedTenantId !== undefined) {
-    return cachedTenantId;
+  const account = getActiveAccount();
+  let cached = tenantIdCache.get(account);
+  if (cached !== undefined) {
+    return cached;
   }
   const profile = getUserProfile();
   const tid = profile?.tenantId ?? null;
-  cachedTenantId = tid;
+  tenantIdCache.set(account, tid);
   return tid;
 }

@@ -100,7 +100,7 @@ All tenant-specific config is extracted from the user's session localStorage, so
 
 ### Login flow
 
-All operations use direct API calls. A persistent browser profile (`~/.teams-mcp-server/browser-profile/`) stores Microsoft session cookies and MSAL tokens, enabling silent re-authentication.
+All operations use direct API calls. A persistent browser profile stores Microsoft session cookies and MSAL tokens, enabling silent re-authentication. Set `TEAMS_MCP_ACCOUNT` per MCP server process; the profile is account-scoped (`~/.teams-mcp-server/browser-profile/` for `default`, or `~/.teams-mcp-server/accounts/<account>/browser-profile/` for named accounts).
 
 1. **First login**: Visible browser opens, user authenticates, session state is saved, browser closes.
 2. **Token expiry**: Headless browser (persistent profile) refreshes tokens via silent SSO, no interaction.
@@ -220,12 +220,12 @@ When a roadmap item is completed, remove it entirely from `ROADMAP.md` - do not 
 
 ### File locations
 
-Session files live in a per-user config directory (consistent regardless of invocation method):
+Session files live in a per-user config directory (consistent regardless of invocation method). `TEAMS_MCP_CONFIG_DIR` overrides the base directory:
 
 - **macOS/Linux**: `~/.teams-mcp-server/`
 - **Windows**: `%APPDATA%\teams-mcp-server\`
 
-Contents: `session-state.json` (encrypted session), `token-cache.json` (encrypted tokens), `browser-profile/` (persistent Chrome/Edge profile). Dev-only: `./debug-output/` (gitignored screenshots/HTML). Reference docs: `docs/API-REFERENCE.md`, `docs/SESSION-DATA-REFERENCE.md`.
+The `default` account stores `session-state.json`, `token-cache.json`, and `browser-profile/` directly in the base directory. Named accounts use `accounts/<account>/` beneath it. Set `TEAMS_MCP_ACCOUNT` to select a named account for the server process. Dev-only: `./debug-output/` (gitignored screenshots/HTML). Reference docs: `docs/API-REFERENCE.md`, `docs/SESSION-DATA-REFERENCE.md`.
 
 ### Message deep links
 

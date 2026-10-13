@@ -1,16 +1,17 @@
 /**
  * Playwright browser context management.
  * Creates and manages browser contexts with session persistence.
- * 
+ *
  * Uses the system's installed Chrome or Edge browser rather than downloading
  * Playwright's bundled Chromium. This significantly reduces install size.
- * 
- * All modes (headless and visible) use a persistent browser profile stored at
- * ~/.teams-mcp-server/browser-profile/. This means:
+ *
+ * All modes (headless and visible) use a persistent browser profile stored under
+ * the active account's config directory. This means:
  * - Microsoft session cookies persist across launches (longer-lived than MSAL tokens)
  * - Headless token refresh can silently re-authenticate using the profile's session
  * - Visible login retains extensions (e.g. Bitwarden) and form autofill data
  * - No need for storageState temp files or encrypted session restoration for browser use
+ * - Each account gets its own isolated browser profile for multi-account support
  */
 
 import { chromium, type BrowserContext, type Page } from 'playwright';
@@ -18,7 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   ensureConfigDir,
-  CONFIG_DIR,
+  getBrowserProfileDir,
   writeSessionState,
 } from '../auth/session-store.js';
 import { clearRegionCache } from '../utils/auth-guards.js';
@@ -30,21 +31,12 @@ export interface BrowserManager {
 }
 
 /**
- * Directory for the persistent browser profile.
- * This is a dedicated Chrome/Edge profile within the config dir, so extensions
- * (e.g. Bitwarden) and form autofill data persist across login sessions
- * without conflicting with the user's running browser instance.
- * 
- * Both headless and visible modes share this profile, so Microsoft's long-lived
- * session cookies enable silent headless re-authentication without user interaction.
- */
-const BROWSER_PROFILE_DIR = path.join(CONFIG_DIR, 'browser-profile');
-
-/**
- * Path to the Chromium SingletonLock file.
+ * Path to the Chromium SingletonLock file within the active account's profile.
  * This file prevents multiple processes from using the same profile.
  */
-const SINGLETON_LOCK_PATH = path.join(BROWSER_PROFILE_DIR, 'SingletonLock');
+function getSingletonLockPath(): string {
+  return path.join(getBrowserProfileDir(), 'SingletonLock');
+}
 
 /**
  * Checks if a process with the given PID is running.
@@ -61,48 +53,49 @@ function isProcessRunning(pid: number): boolean {
 
 /**
  * Cleans up stale SingletonLock files left by crashed browser sessions.
- * 
+ *
  * On Unix systems, SingletonLock is a symlink whose target contains the PID.
  * On Windows, it's a regular file. If the owning process is no longer running,
  * we can safely remove the lock.
- * 
+ *
  * @returns true if a stale lock was removed, false otherwise
  */
 function cleanupStaleSingletonLock(): boolean {
-  if (!fs.existsSync(SINGLETON_LOCK_PATH)) {
+  const lockPath = getSingletonLockPath();
+  if (!fs.existsSync(lockPath)) {
     return false;
   }
 
   try {
     // On Unix, SingletonLock is a symlink like "hostname-12345"
     // The number after the last dash is the PID
-    const linkTarget = fs.readlinkSync(SINGLETON_LOCK_PATH);
+    const linkTarget = fs.readlinkSync(lockPath);
     const pidMatch = linkTarget.match(/-(\d+)$/);
-    
+
     if (pidMatch) {
       const pid = parseInt(pidMatch[1], 10);
-      
+
       if (isProcessRunning(pid)) {
         // Process is still running - lock is valid
         return false;
       }
-      
+
       // Process is dead - remove stale lock
       log.info('browser', `Removing stale SingletonLock (PID ${pid} not running)`);
-      fs.unlinkSync(SINGLETON_LOCK_PATH);
+      fs.unlinkSync(lockPath);
       return true;
     }
   } catch {
     // On Windows or if readlink fails, try checking file age
     // If the lock file is old and we can't verify the process, remove it
     try {
-      const stats = fs.lstatSync(SINGLETON_LOCK_PATH);
+      const stats = fs.lstatSync(lockPath);
       const ageMs = Date.now() - stats.mtimeMs;
       const oneHourMs = 60 * 60 * 1000;
-      
+
       if (ageMs > oneHourMs) {
         log.info('browser', `Removing old SingletonLock (${Math.round(ageMs / 60000)} minutes old)`);
-        fs.unlinkSync(SINGLETON_LOCK_PATH);
+        fs.unlinkSync(lockPath);
         return true;
       }
     } catch {
@@ -117,7 +110,7 @@ function cleanupStaleSingletonLock(): boolean {
  * Determines the browser channel to use based on the platform.
  * - Windows: Use Microsoft Edge (always installed on Windows 10+)
  * - macOS/Linux: Use Chrome
- * 
+ *
  * @returns The browser channel name for Playwright
  */
 function getBrowserChannel(): 'msedge' | 'chrome' {
@@ -130,13 +123,14 @@ function getBrowserChannel(): 'msedge' | 'chrome' {
  * Uses the system's installed Chrome or Edge browser rather than downloading
  * Playwright's bundled Chromium (~180MB savings).
  *
- * The persistent profile at ~/.teams-mcp-server/browser-profile/ is shared
- * between headless and visible modes. This provides:
+ * The persistent profile is stored under the active account's config directory.
+ * This provides:
  * - Silent headless re-auth via long-lived Microsoft session cookies
  * - Extensions (e.g. Bitwarden) and form autofill for visible login
  * - No storageState temp file management needed
+ * - Account isolation for multi-account support
  *
- * Note: Only one process can use the profile at a time (Chromium profile lock).
+ * Note: Only one process can use a given profile at a time (Chromium profile lock).
  * The MCP server serialises tool calls, and token-refresh checks for an active
  * browser before attempting refresh to avoid lock contention.
  *
@@ -150,12 +144,13 @@ export async function createBrowserContext(
   ensureConfigDir();
 
   const channel = getBrowserChannel();
+  const browserProfileDir = getBrowserProfileDir();
 
   // Clean up any stale lock files before attempting to launch
   cleanupStaleSingletonLock();
 
   const launchBrowser = async (): Promise<BrowserManager> => {
-    const context = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
+    const context = await chromium.launchPersistentContext(browserProfileDir, {
       headless,
       channel,
       viewport: { width: 1280, height: 800 },
@@ -172,15 +167,16 @@ export async function createBrowserContext(
     return await launchBrowser();
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    
+
     // Check if this is a profile lock error and try to recover
     if (errorMessage.includes('ProcessSingleton') || errorMessage.includes('SingletonLock')) {
       log.warn('browser', 'Profile lock detected, attempting to clean up and retry...');
-      
+
       // Force remove the lock file and retry once
       try {
-        if (fs.existsSync(SINGLETON_LOCK_PATH)) {
-          fs.unlinkSync(SINGLETON_LOCK_PATH);
+        const lockPath = getSingletonLockPath();
+        if (fs.existsSync(lockPath)) {
+          fs.unlinkSync(lockPath);
           log.info('browser', 'Removed SingletonLock file, retrying browser launch...');
           return await launchBrowser();
         }

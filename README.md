@@ -333,16 +333,34 @@ npm run cli -- send "Hi" --to "conversation-id"
 
 
 
-## Session Files
+## Session Files and Multiple Accounts
 
 Session files are stored in a user config directory (encrypted):
 
 - **macOS/Linux**: `~/.teams-mcp-server/`
 - **Windows**: `%APPDATA%\teams-mcp-server\`
 
-Contents: `session-state.json`, `token-cache.json`, `browser-profile/`
+The base directory can be overridden with `TEAMS_MCP_CONFIG_DIR`. The default account keeps the files directly in this directory. Additional accounts are isolated under `accounts/<account>/` and have their own session, token cache, and browser profile:
 
-If your session expires, call `teams_login` or delete the config directory.
+```text
+~/.teams-mcp-server/
+├── session-state.json          # default account
+├── token-cache.json
+├── browser-profile/
+└── accounts/
+    ├── work/
+    │   ├── session-state.json
+    │   ├── token-cache.json
+    │   └── browser-profile/
+    └── personal/
+        ├── session-state.json
+        ├── token-cache.json
+        └── browser-profile/
+```
+
+Set `TEAMS_MCP_ACCOUNT` when starting an MCP server process. Every tool in that process then uses that account; account is intentionally not exposed as a tool parameter. Run one MCP server process per Teams account. Account names may contain letters, numbers, `.`, `_`, and `-`.
+
+If a session expires, call `teams_login` for the affected account or delete that account's directory.
 
 ## Development
 

@@ -226,8 +226,10 @@ async function getAuthStatus(page: Page): Promise<AuthStatus> {
     };
   }
 
-  // If on Teams domain, check for authenticated content
-  if (currentUrl.includes('teams.microsoft.com')) {
+  // If on any supported Teams domain, check for authenticated content.
+  // New Teams commonly uses teams.cloud.microsoft, while government tenants
+  // use teams.microsoft.us or dod.teams.microsoft.us.
+  if (isTeamsUrl(currentUrl)) {
     const hasContent = await hasAuthenticatedContent(page);
     return {
       isAuthenticated: hasContent,

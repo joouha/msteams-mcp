@@ -20,6 +20,7 @@ import {
 import {
   hasSessionState,
   isSessionLikelyExpired,
+  ensureConfigDir,
 } from './auth/session-store.js';
 import {
   getSubstrateTokenStatus,
@@ -102,6 +103,10 @@ export class TeamsServer {
    * Creates and configures the MCP server.
    */
   async createServer(): Promise<Server> {
+    // Select the account once per process via TEAMS_MCP_ACCOUNT and ensure its
+    // isolated storage directory exists before exposing tools.
+    ensureConfigDir();
+
     const server = new Server(
       {
         name: 'teams-mcp',

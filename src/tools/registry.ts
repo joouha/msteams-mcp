@@ -1,7 +1,9 @@
 /**
  * Tool registry - centralised tool management.
- * 
+ *
  * All tools are registered here and can be looked up by name.
+ * Account selection is process-scoped via TEAMS_MCP_ACCOUNT; account is not
+ * exposed as an MCP tool parameter.
  */
 
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -25,11 +27,6 @@ import { fileTools } from './file-tools.js';
 import { tagTools } from './tag-tools.js';
 import { assignmentTools } from './assignment-tools.js';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Registry
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** All registered tools (cast to base type for registry). */
 const allTools: RegistryEntry[] = [
   ...searchTools,
   ...messageTools,
@@ -41,35 +38,21 @@ const allTools: RegistryEntry[] = [
   ...assignmentTools,
 ];
 
-/** Lookup map for tools by name. */
 const toolsByName = new Map<string, RegistryEntry>(
   allTools.map(tool => [tool.definition.name, tool])
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Gets all tool definitions for MCP ListTools.
- */
 export function getToolDefinitions(): Tool[] {
   return allTools.map(tool => tool.definition);
 }
 
-/**
- * Gets a tool by name.
- */
 export function getTool(name: string): RegistryEntry | undefined {
   return toolsByName.get(name);
 }
 
-/**
- * Invokes a tool by name with the given arguments.
- */
 export async function invokeTool(name: string, args: unknown): Promise<ToolResult> {
   const tool = toolsByName.get(name);
-  
+
   if (!tool) {
     return {
       success: false,
@@ -77,7 +60,6 @@ export async function invokeTool(name: string, args: unknown): Promise<ToolResul
     };
   }
 
-  // Validate input
   const parseResult = tool.schema.safeParse(args);
   if (!parseResult.success) {
     return {
@@ -86,13 +68,9 @@ export async function invokeTool(name: string, args: unknown): Promise<ToolResul
     };
   }
 
-  // Invoke handler
   return tool.handler(parseResult.data);
 }
 
-/**
- * Checks if a tool exists.
- */
 export function hasTool(name: string): boolean {
   return toolsByName.has(name);
 }

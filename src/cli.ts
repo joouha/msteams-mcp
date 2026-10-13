@@ -21,6 +21,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from './server.js';
+import { setActiveAccount } from './auth/session-store.js';
 
 // Shortcuts map command names to tool names and parameter mappings
 const SHORTCUTS: Record<string, { tool: string; primaryArg?: string }> = {
@@ -491,6 +492,11 @@ async function main(): Promise<void> {
   let cleanup: (() => Promise<void>) | null = null;
   
   try {
+    const account = typeof parsed.args.account === 'string' ? parsed.args.account : undefined;
+    if (account) {
+      delete parsed.args.account;
+      setActiveAccount(account);
+    }
     const { client, cleanup: cleanupFn } = await createTestClient();
     cleanup = cleanupFn;
     
